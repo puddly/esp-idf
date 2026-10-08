@@ -309,11 +309,22 @@ FORCE_INLINE_ATTR bool _uart_ll_set_baudrate(uart_dev_t *hw, uint32_t baud, uint
         return false; // unachievable baud-rate
     }
 
+    // CLKDIV is copied into the UART core clock domain by hardware, and that copy is lost if sclk_div_num changes while it is in progress.
+    // So do this one change in manual sync mode: write both registers, then request a single copy and wait for it to finish.
+    hw->id.high_speed = 0;
+    while (hw->id.reg_update) {
+    }
+
     uint32_t clk_div = ((sclk_freq) << 4) / (baud * sclk_div);
     // The baud rate configuration register is divided into an integer part and a fractional part.
     hw->clkdiv.clkdiv = clk_div >> 4;
     hw->clkdiv.clkdiv_frag = clk_div & 0xf;
     HAL_FORCE_MODIFY_U32_REG_FIELD(hw->clk_conf, sclk_div_num, sclk_div - 1);
+    hw->id.reg_update = 1;
+    while (hw->id.reg_update) {
+    }
+
+    hw->id.high_speed = 1;
     return true;
 }
 

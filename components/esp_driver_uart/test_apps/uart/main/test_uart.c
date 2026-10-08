@@ -3,6 +3,7 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+#include <stdlib.h>
 #include <string.h>
 #include <sys/param.h>
 #include "unity.h"
@@ -855,6 +856,7 @@ TEST_CASE("uart software flow control (XON/XOFF)", "[uart_flow_ctrl]")
     TEST_ESP_OK(uart_driver_delete(uart_num));
 }
 
+#if CONFIG_ESP_CONSOLE_UART
 static void uart_console_write_task(void *arg)
 {
     while (1) {
@@ -914,6 +916,51 @@ TEST_CASE("uart auto baud rate detection", "[uart]")
         vTaskDelete(console_write_task);
     }
 }
+
+TEST_CASE("uart baud rate takes effect after switching from a slow baud rate", "[uart]")
+{
+    uart_port_param_t port_param = {};
+    TEST_ASSERT(port_select(&port_param));
+    // Like the auto baud rate case: the console UART is switched and the selected port measures its TX pin, so nothing to test on LP UART
+    uart_port_t uart_num = port_param.port_num;
+    if (uart_num >= SOC_UART_HP_NUM) {
+        return;
+    }
+
+    TaskHandle_t console_write_task = NULL;
+    xTaskCreate(uart_console_write_task, "uart_console_write_task", 2048, NULL, 5, &console_write_task);
+    vTaskDelay(20);
+
+    uart_bitrate_detect_config_t conf = {
+        .rx_io_num = uart_periph_signal[CONFIG_CONSOLE_UART_NUM].pins[SOC_UART_PERIPH_SIGNAL_TX].default_gpio,
+        .source_clk = UART_SCLK_DEFAULT,
+    };
+    uart_bitrate_res_t res = {};
+    int32_t detected_baudrate = 0;
+
+    // 150 baud needs the largest UART core clock divider and the console baud rate needs none. Switching back to the console
+    // baud rate used to lose the CLKDIV write at random while the core clock was still divided, leaving the UART near
+    // 19.6 kbaud on ESP32-S3. Each switch fails independently of the others, so repeat it a number of times.
+    for (int i = 0; i < 30; i++) {
+        TEST_ESP_OK(uart_set_baudrate(CONFIG_CONSOLE_UART_NUM, 150));
+        TEST_ESP_OK(uart_set_baudrate(CONFIG_CONSOLE_UART_NUM, CONFIG_CONSOLE_UART_BAUDRATE));
+
+        TEST_ESP_OK(uart_detect_bitrate_start(uart_num, &conf));
+        vTaskDelay(pdMS_TO_TICKS(200));
+        TEST_ESP_OK(uart_detect_bitrate_stop(uart_num, true, &res));
+        detected_baudrate = res.clk_freq_hz * 2 / res.pos_period;
+
+        if (abs(detected_baudrate - CONFIG_CONSOLE_UART_BAUDRATE) > CONFIG_CONSOLE_UART_BAUDRATE * 0.03) {
+            // The core clock is undivided by now, so a second attempt always lands and the failure can be printed
+            uart_set_baudrate(CONFIG_CONSOLE_UART_NUM, CONFIG_CONSOLE_UART_BAUDRATE);
+            break;
+        }
+    }
+
+    vTaskDelete(console_write_task);
+    TEST_ASSERT_INT32_WITHIN(CONFIG_CONSOLE_UART_BAUDRATE * 0.03, CONFIG_CONSOLE_UART_BAUDRATE, detected_baudrate);
+}
+#endif // CONFIG_ESP_CONSOLE_UART
 
 IRAM_ATTR static void uart_signal_inject_glitch_task(void *param)
 {
